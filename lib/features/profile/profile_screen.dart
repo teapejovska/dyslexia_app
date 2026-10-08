@@ -1,158 +1,277 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../history/saved_texts_controller.dart';
 import '../home/home_screen.dart';
 import '../tts/tts_screen.dart';
 import '../ocr/ocr_screen.dart';
+import '../settings/provider.dart';
 import '../settings/settings_screen.dart';
+import '../statistics/stats_screen.dart';
+import '../statistics/stats_service.dart';
+import '../../widgets/app_bottom_nav.dart';
+import '../../widgets/ui/decorative_background.dart';
+import '../../widgets/ui/home_layout.dart';
+import '../../widgets/ui/icon_badge.dart';
+import '../../widgets/ui/tap_scale.dart';
+import '../../core/theme.dart';
+import '../auth/auth_service.dart';
+import 'profile_achievements.dart';
+import 'profile_widgets/profile_achievements_section.dart';
+import 'profile_widgets/profile_identity_header.dart';
+import 'profile_widgets/profile_progress_section.dart';
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
 
-  void _goToHome(BuildContext context) {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
-    );
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  final AuthService _authService = AuthService();
+  final StatsService _stats = StatsService();
+
+  String userName = 'Корисник';
+  int ocrCount = 0;
+  int ttsCount = 0;
+  int savedCount = 0;
+  int streak = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
   }
 
-  void _goToRead(BuildContext context) {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const TtsScreen()),
-    );
+  Future<void> _load() async {
+    final name = await _authService.resolveDisplayName();
+    final o = await _stats.getOCRCount();
+    final t = await _stats.getTTSCount();
+    final s = await _stats.getSavedTexts();
+    final readingStreak = await _stats.getReadingStreak();
+    if (!mounted) return;
+    setState(() {
+      userName = (name != null && name.isNotEmpty) ? name : 'Корисник';
+      ocrCount = o;
+      ttsCount = t;
+      savedCount = s;
+      streak = readingStreak;
+    });
   }
 
-  void _goToScan(BuildContext context) {
-    Navigator.pushReplacement(
+  void _open(Widget screen) {
+    Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const OcrScreen()),
-    );
+      MaterialPageRoute(builder: (_) => screen),
+    ).then((_) => _load());
   }
 
-  void _goToSettings(BuildContext context) {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+  Future<void> _confirmLogout() async {
+    final settingsPending = context.read<SettingsProvider>().hasPendingSync;
+    final textsPending =
+        context.read<SavedTextsController?>()?.hasPendingSync ?? false;
+    final pendingWhat = settingsPending && textsPending
+        ? 'Некои промени во поставките и зачуваните текстови'
+        : settingsPending
+        ? 'Некои промени во поставките'
+        : 'Некои зачувани текстови';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Одјави се?'),
+        content: Text(
+          settingsPending || textsPending
+              ? 'Ќе се вратиш на екранот за најава.\n\n'
+                    '$pendingWhat уште не се синхронизирани. '
+                    'Остануваат зачувани на овој уред и ќе се испратат '
+                    'кога повторно ќе се најавиш тука.'
+              : 'Ќе се вратиш на екранот за најава.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Откажи'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Одјави се'),
+          ),
+        ],
+      ),
     );
+
+    if (ok == true) await _logout();
+  }
+
+  Future<void> _logout() async {
+    // Send pending preference edits while this account is still signed in;
+    // anything unacknowledged stays pending under this account's uid.
+    final savedTexts = context.read<SavedTextsController?>();
+    await Future.wait([
+      context.read<SettingsProvider>().flushPendingSync(),
+      if (savedTexts != null) savedTexts.flushPendingSync(),
+    ]);
+    // AuthGate listens to authStateChanges and replaces the session Navigator
+    // with LoginScreen — clearing Profile/Home from the stack.
+    await _authService.logout();
   }
 
   @override
   Widget build(BuildContext context) {
+    final firstName = userName.split(' ').first;
+    final initial = firstName.isNotEmpty ? firstName[0].toUpperCase() : '?';
+    final achievements = buildProfileAchievements(
+      ocrCount: ocrCount,
+      ttsCount: ttsCount,
+      savedCount: savedCount,
+    );
+
     return Scaffold(
-      backgroundColor: const Color(0xFFFBFAF3),
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(24, 34, 24, 28),
-                child: Column(
-                  children: [
-                    const SizedBox(height: 20),
+      backgroundColor: context.appBackground,
+      body: DecorativeBackground(
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final width = constraints.maxWidth;
+                    final padding = HomeLayout.horizontalPadding(width);
 
-                    const Text(
-                      'Мој профил',
-                      style: TextStyle(
-                        color: Color(0xFF07162E),
-                        fontSize: 36,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-
-                    const SizedBox(height: 26),
-
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(28),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [
-                            Color(0xFF63B5D2),
-                            Color(0xFF638FDF),
-                          ],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
+                    return RefreshIndicator(
+                      color: AppColors.primary,
+                      onRefresh: _load,
+                      child: SingleChildScrollView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        padding: EdgeInsets.fromLTRB(
+                          padding,
+                          AppSpacing.xl,
+                          padding,
+                          AppSpacing.xxl,
                         ),
-                        borderRadius: BorderRadius.circular(32),
+                        child: HomeLayout.constrain(
+                          screenWidth: width,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              ProfileIdentityHeader(
+                                initial: initial,
+                                name: firstName,
+                                status: readerStatusLabel(
+                                  ocrCount: ocrCount,
+                                  ttsCount: ttsCount,
+                                ),
+                                streak: streak,
+                              ),
+
+                              const SizedBox(height: AppSpacing.xxxl),
+
+                              ProfileProgressSection(
+                                ocrCount: ocrCount,
+                                ttsCount: ttsCount,
+                              ),
+
+                              const SizedBox(height: AppSpacing.xxxl),
+
+                              ProfileAchievementsSection(
+                                achievements: achievements,
+                              ),
+
+                              const SizedBox(height: AppSpacing.xxxl),
+
+                              _ProfileNavButton(
+                                icon: Icons.insights_rounded,
+                                color: AppColors.mint,
+                                title: 'Мој напредок',
+                                onTap: () => _open(const StatsScreen()),
+                              ),
+
+                              const SizedBox(height: AppSpacing.md),
+
+                              _ProfileNavButton(
+                                icon: Icons.settings_rounded,
+                                color: context.appTextSecondary,
+                                title: 'Поставки',
+                                onTap: () => _open(const SettingsScreen()),
+                              ),
+
+                              const SizedBox(height: AppSpacing.xxl),
+
+                              _ProfileLogoutButton(onTap: _confirmLogout),
+
+                              const SizedBox(height: AppSpacing.xl),
+                            ],
+                          ),
+                        ),
                       ),
-                      child: const Column(
-                        children: [
-                          CircleAvatar(
-                            radius: 48,
-                            backgroundColor: Colors.white,
-                            child: Icon(
-                              Icons.person_outline_rounded,
-                              size: 58,
-                              color: Color(0xFF3196C2),
-                            ),
-                          ),
-                          SizedBox(height: 18),
-                          Text(
-                            'Ана',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 30,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          SizedBox(height: 8),
-                          Text(
-                            'Твојот напредок и статистики',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 30),
-
-                    const _ProfileStatCard(
-                      icon: Icons.local_fire_department_outlined,
-                      title: '5 дена низ ред',
-                      subtitle: 'Продолжи со читање секој ден',
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    const _ProfileStatCard(
-                      icon: Icons.access_time_rounded,
-                      title: '18 минути читање',
-                      subtitle: 'Вкупно читање денес',
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    const _ProfileStatCard(
-                      icon: Icons.menu_book_outlined,
-                      title: '3 завршени текста',
-                      subtitle: 'Одличен напредок!',
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    const _ProfileStatCard(
-                      icon: Icons.emoji_events_outlined,
-                      title: '64% дневна цел',
-                      subtitle: 'Супер напредуваш денес',
-                    ),
-                  ],
+                    );
+                  },
                 ),
               ),
-            ),
+              AppBottomNav(
+                currentIndex: 3,
+                onHomeTap: () => _open(const HomeScreen()),
+                onReadTap: () => _open(const TtsScreen()),
+                onScanTap: () => _open(const OcrScreen()),
+                onProfileTap: () {},
+                onSettingsTap: () => _open(const SettingsScreen()),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
-            _BottomNavBar(
-              currentIndex: 3,
-              onHomeTap: () => _goToHome(context),
-              onReadTap: () => _goToRead(context),
-              onScanTap: () => _goToScan(context),
-              onProfileTap: () {},
-              onSettingsTap: () => _goToSettings(context),
+class _ProfileNavButton extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  final VoidCallback onTap;
+
+  const _ProfileNavButton({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TapScale(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(minHeight: AppTouch.comfortable),
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg,
+          vertical: AppSpacing.md,
+        ),
+        decoration: BoxDecoration(
+          color: context.appSurface,
+          borderRadius: BorderRadius.circular(AppRadius.xl),
+          border: Border.all(color: context.appBorder),
+          boxShadow: context.highContrast
+              ? AppElevation.none
+              : AppElevation.soft(context),
+        ),
+        child: Row(
+          children: [
+            IconBadge(icon: icon, color: color, size: 44, iconSize: 22),
+            const SizedBox(width: AppSpacing.lg),
+            Expanded(
+              child: Text(
+                title,
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(height: 1.25),
+              ),
             ),
+            Icon(Icons.chevron_right_rounded, color: context.appTextSecondary),
           ],
         ),
       ),
@@ -160,200 +279,33 @@ class ProfileScreen extends StatelessWidget {
   }
 }
 
-class _ProfileStatCard extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
+class _ProfileLogoutButton extends StatelessWidget {
+  final VoidCallback onTap;
 
-  const _ProfileStatCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
+  const _ProfileLogoutButton({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-          color: const Color(0xFFE7E1D5),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.025),
-            blurRadius: 12,
-            offset: const Offset(0, 6),
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton(
+        onPressed: onTap,
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppColors.error,
+          side: BorderSide(color: AppColors.error.withValues(alpha: 0.45)),
+          minimumSize: const Size(double.infinity, AppTouch.min),
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.xl,
+            vertical: AppSpacing.lg,
           ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 62,
-            height: 62,
-            decoration: BoxDecoration(
-              color: const Color(0xFFCFF2FF),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Icon(
-              icon,
-              color: const Color(0xFF3196C2),
-              size: 32,
-            ),
-          ),
-
-          const SizedBox(width: 18),
-
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Color(0xFF07162E),
-                    fontSize: 19,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    color: Color(0xFF505A70),
-                    fontSize: 15,
-                    height: 1.3,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BottomNavBar extends StatelessWidget {
-  final int currentIndex;
-  final VoidCallback onHomeTap;
-  final VoidCallback onReadTap;
-  final VoidCallback onScanTap;
-  final VoidCallback onProfileTap;
-  final VoidCallback onSettingsTap;
-
-  const _BottomNavBar({
-    required this.currentIndex,
-    required this.onHomeTap,
-    required this.onReadTap,
-    required this.onScanTap,
-    required this.onProfileTap,
-    required this.onSettingsTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 112,
-      padding: const EdgeInsets.fromLTRB(18, 12, 18, 18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          top: BorderSide(
-            color: const Color(0xFFE7E1D5).withOpacity(0.8),
-            width: 1,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.xl),
           ),
         ),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _BottomNavItem(
-            icon: Icons.home_outlined,
-            label: 'Дома',
-            selected: currentIndex == 0,
-            onTap: onHomeTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.menu_book_outlined,
-            label: 'Читај',
-            selected: currentIndex == 1,
-            onTap: onReadTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.document_scanner_outlined,
-            label: 'Скенирај',
-            selected: currentIndex == 2,
-            onTap: onScanTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.person_outline_rounded,
-            label: 'Профил',
-            selected: currentIndex == 3,
-            onTap: onProfileTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.settings_outlined,
-            label: 'Поставки',
-            selected: currentIndex == 4,
-            onTap: onSettingsTap,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BottomNavItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  const _BottomNavItem({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final Color activeColor = const Color(0xFF3196C2);
-    final Color inactiveColor = const Color(0xFF5E6677);
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(28),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: selected ? const Color(0xFFCFF2FF) : Colors.transparent,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              icon,
-              size: 29,
-              color: selected ? activeColor : inactiveColor,
-            ),
-          ),
-          const SizedBox(height: 7),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: selected ? activeColor : inactiveColor,
-            ),
-          ),
-        ],
+        child: const Text(
+          'Одјави се',
+          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+        ),
       ),
     );
   }

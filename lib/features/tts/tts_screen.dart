@@ -1,524 +1,663 @@
+import 'package:dyslexia_app/features/statistics/stats_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+
+import '../settings/provider.dart';
+import '../../widgets/app_bottom_nav.dart';
+import '../../widgets/ui/decorative_background.dart';
+import '../../widgets/ui/home_layout.dart';
+import '../../widgets/ui/listen_text_toolbar.dart';
+import '../../widgets/ui/reading_controls.dart';
+import '../../widgets/ui/reading_ruler_overlay.dart';
+import '../../widgets/ui/word_focus_controls.dart';
+import '../../widgets/ui/word_focus_text.dart';
+import '../../core/accessibility.dart';
+import '../../core/keyboard.dart';
+import '../../core/theme.dart';
 
 import 'tts_service.dart';
 import '../home/home_screen.dart';
 import '../ocr/ocr_screen.dart';
 import '../profile/profile_screen.dart';
 import '../settings/settings_screen.dart';
+import '../history/saved_text.dart';
+import '../history/widgets/save_text_flow.dart';
+import '../simplify/text_simplification_service.dart';
+import '../simplify/widgets/simplify_text_bar.dart';
 
 class TtsScreen extends StatefulWidget {
-  const TtsScreen({super.key});
+  @visibleForTesting
+  final TtsService? ttsService;
+
+  /// Saved History item to show; both of its versions stay available.
+  final SavedText? initialText;
+
+  const TtsScreen({super.key, this.ttsService, this.initialText});
 
   @override
   State<TtsScreen> createState() => _TtsScreenState();
 }
 
 class _TtsScreenState extends State<TtsScreen> {
-  final TtsService _tts = TtsService();
+  late final TtsService _tts;
+  final StatsService _statsService = StatsService();
+  final TextSimplificationService _simplifyService =
+      TextSimplificationService();
 
-  final TextEditingController _controller = TextEditingController(
-    text:
-    'Читањето е прозорец кон светот. Со\nмалку помош, секој може да отвори\nнови приказни и идеи.',
-  );
+  final TextEditingController _controller = TextEditingController();
+  final FocusNode _editorFocus = FocusNode();
+  final ReadingRulerScrollController _textScrollController =
+      ReadingRulerScrollController();
 
   bool _isReading = false;
+  bool _keyboardWasOpen = false;
+  bool _isSimplifying = false;
+  bool _showSimplified = false;
+  String _originalText = '';
+  String? _simplifiedText;
 
-  int get _characterCount => _controller.text.length;
+  /// «Фокус на збор» for this screen only; never persisted. When on, the
+  /// controller text is shown read-only in [WordFocusText].
+  bool _wordFocusOn = false;
+  final GlobalKey<WordFocusTextState> _wordFocusKey = GlobalKey();
+  TextRange? _focusedWord;
 
-  int get _wordCount {
+  /// Text [_focusedWord] was selected in; any other text invalidates it.
+  String _focusedWordText = '';
+
+  /// What the current text was saved as in History.
+  final SavedTextDraft _draft = SavedTextDraft();
+  SavedTextSource _textSource = SavedTextSource.listen;
+
+  bool get _isSaved {
+    final simplified = _showSimplified ? _controller.text : _simplifiedText;
+    final original = _showSimplified ? _originalText : _controller.text;
+    return _draft.isSavedAs(original, simplified);
+  }
+
+  bool get _hasText => _controller.text.trim().isNotEmpty;
+
+  TextRange? get _activeFocusedWord =>
+      _focusedWordText == _controller.text ? _focusedWord : null;
+
+  bool get _hasSimplified =>
+      _simplifiedText != null && _simplifiedText!.trim().isNotEmpty;
+
+  String get _toolbarTitle {
+    if (!_hasSimplified) return 'Текст';
+    return _showSimplified ? 'Поедноставен текст' : 'Оригинален текст';
+  }
+
+  int get _words {
     final text = _controller.text.trim();
+    if (text.isEmpty) return 0;
+    return text.split(RegExp(r'\s+')).length;
+  }
 
-    if (text.isEmpty) {
-      return 0;
+  @override
+  void initState() {
+    super.initState();
+    _tts = widget.ttsService ?? TtsService();
+    final initial = widget.initialText;
+    if (initial != null) {
+      _originalText = initial.originalText;
+      _simplifiedText = initial.hasSimplified ? initial.simplifiedText : null;
+      _textSource = initial.source;
+      _controller.text = initial.originalText;
+      _draft.attach(initial);
     }
-
-    return text
-        .split(RegExp(r'\s+'))
-        .where((word) => word.trim().isNotEmpty)
-        .length;
   }
 
   @override
   void dispose() {
+    _editorFocus.dispose();
     _tts.stop();
+    _tts.dispose();
+    _simplifyService.dispose();
+    _textScrollController.dispose();
     _controller.dispose();
     super.dispose();
   }
 
-  Future<void> _startReading() async {
+  /// When IME dismisses, drop focus so we do not treat "focused" as editing.
+  void _syncFocusAfterKeyboard(bool keyboardOpen) {
+    if (_keyboardWasOpen && !keyboardOpen && _editorFocus.hasFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (!isKeyboardVisible(context) && _editorFocus.hasFocus) {
+          _editorFocus.unfocus();
+        }
+      });
+    }
+    _keyboardWasOpen = keyboardOpen;
+  }
+
+  Future<void> _start(double speechRate) async {
     final text = _controller.text.trim();
 
     if (text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Прво внеси текст!'),
-        ),
+        const SnackBar(content: Text('Прво напиши или залепи текст.')),
       );
       return;
     }
 
-    setState(() {
-      _isReading = true;
-    });
-
-    await _tts.speak(text);
+    _editorFocus.unfocus();
+    setState(() => _isReading = true);
+    try {
+      await _tts.setSpeechRate(speechRate);
+      await _tts.speak(text);
+      await _statsService.incrementTTS();
+    } finally {
+      if (mounted) setState(() => _isReading = false);
+    }
   }
 
-  Future<void> _stopReading() async {
+  Future<void> _stop() async {
     await _tts.stop();
+    if (mounted) setState(() => _isReading = false);
+  }
 
+  Future<void> _copyText() async {
+    final text = _controller.text;
+    if (text.trim().isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Текстот е копиран')));
+  }
 
+  Future<void> _changeSpeed(SettingsProvider settings) async {
+    await showSpeechRatePicker(context: context, settings: settings);
+    if (!mounted) return;
+    await _tts.setSpeechRate(settings.speechRate);
+  }
+
+  Future<void> _confirmClear() async {
+    if (!_hasText) return;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Избриши текст'),
+        content: const Text('Да го избришеме текстот?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Откажи'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Избриши'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _clearText();
+  }
+
+  Future<void> _clearText() async {
+    if (_isReading) {
+      await _stop();
+    }
+    _tts.resetProgress();
+    _controller.clear();
+    _originalText = '';
+    _simplifiedText = null;
+    _showSimplified = false;
+    _wordFocusOn = false;
+    _focusedWord = null;
+    _draft.reset();
+    _textSource = SavedTextSource.listen;
+    if (_textScrollController.hasClients) {
+      _textScrollController.jumpTo(0);
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _saveText() async {
+    _persistActiveBucket();
+    await saveTextToHistory(
+      context: context,
+      draft: _draft,
+      source: _textSource,
+      originalText: _originalText,
+      simplifiedText: _simplifiedText,
+      onStateChanged: () {
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  void _persistActiveBucket() {
+    if (_showSimplified) {
+      _simplifiedText = _controller.text;
+    } else {
+      _originalText = _controller.text;
+    }
+  }
+
+  void _setControllerText(String text) {
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+
+  void _onShowingSimplifiedChanged(bool showSimplified) {
+    if (showSimplified == _showSimplified) return;
+    _persistActiveBucket();
+    _showSimplified = showSimplified;
+    _setControllerText(
+      showSimplified ? (_simplifiedText ?? '') : _originalText,
+    );
+    _tts.resetProgress();
+    setState(() {});
+  }
+
+  Future<void> _simplifyText() async {
+    _persistActiveBucket();
+    final source =
+        (_originalText.trim().isNotEmpty ? _originalText : _controller.text)
+            .trim();
+
+    if (source.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Прво напиши или залепи текст.')),
+      );
+      return;
+    }
+
+    _originalText = source;
+    _editorFocus.unfocus();
+    setState(() => _isSimplifying = true);
+
+    try {
+      final result = await _simplifyService.simplify(source);
+      if (!mounted) return;
+      setState(() {
+        _simplifiedText = result.simplifiedText;
+        _showSimplified = true;
+        _isSimplifying = false;
+        _setControllerText(result.simplifiedText);
+      });
+      _tts.resetProgress();
+      if (result.usedMock) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'DEMO режим: поедноставувањето е локално (нема backend URL).',
+            ),
+          ),
+        );
+      }
+    } on TextSimplificationException catch (e) {
+      if (!mounted) return;
+      setState(() => _isSimplifying = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSimplifying = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Поедноставувањето не успеа. Обиди се повторно.'),
+        ),
+      );
+    }
+  }
+
+  void _onTextChanged(String _) {
+    _tts.resetProgress();
+    if (!_showSimplified) {
+      _originalText = _controller.text;
+    } else {
+      _simplifiedText = _controller.text;
+    }
+    setState(() {});
+  }
+
+  /// Switches between the editor and the read-only word-focus view. The
+  /// controller text is never modified here.
+  Future<void> _setWordFocus(bool on) async {
+    if (on == _wordFocusOn || (on && !_hasText)) return;
+    if (_isReading) await _stop();
+    if (!mounted) return;
+    if (on) _editorFocus.unfocus();
     setState(() {
-      _isReading = false;
+      _wordFocusOn = on;
+      _focusedWord = null;
     });
   }
 
-  void _goToHome() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
-    );
+  Future<void> _editText() async {
+    await _setWordFocus(false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_wordFocusOn) _editorFocus.requestFocus();
+    });
   }
 
-  void _goToScan() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const OcrScreen()),
-    );
+  void _onFocusedWordChanged(TextRange? range) {
+    setState(() {
+      _focusedWord = range;
+      _focusedWordText = _controller.text;
+    });
   }
 
-  void _goToProfile() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const ProfileScreen()),
-    );
-  }
-
-  void _goToSettings() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const SettingsScreen()),
-    );
+  void _open(BuildContext context, Widget screen) {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => screen));
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFFBFAF3),
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.only(bottom: 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const _TtsHeader(),
-                    const SizedBox(height: 38),
+    final settings = Provider.of<SettingsProvider>(context);
+    final hasText = _hasText;
+    final readingMode = _wordFocusOn && hasText;
+    final focusedWord = readingMode ? _activeFocusedWord : null;
+    // Chrome (nav / Play-Stop / toolbar) follows real IME visibility only —
+    // not FocusNode.hasFocus, which can stay true after keyboard dismiss.
+    final isKeyboardVisibleNow = isKeyboardVisible(context);
+    _syncFocusAfterKeyboard(isKeyboardVisibleNow);
 
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 28),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(28),
-                          border: Border.all(
-                            color: const Color(0xFFE7E1D5),
-                            width: 1,
+    return Scaffold(
+      backgroundColor: context.appBackground,
+      resizeToAvoidBottomInset: true,
+      bottomNavigationBar: isKeyboardVisibleNow
+          ? null
+          : AppBottomNav(
+              currentIndex: 1,
+              onHomeTap: () => _open(context, const HomeScreen()),
+              onReadTap: () {},
+              onScanTap: () => _open(context, const OcrScreen()),
+              onProfileTap: () => _open(context, const ProfileScreen()),
+              onSettingsTap: () => _open(context, const SettingsScreen()),
+            ),
+      body: DecorativeBackground(
+        child: SafeArea(
+          bottom: isKeyboardVisibleNow,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              final pad = HomeLayout.horizontalPadding(width);
+              final tall = constraints.maxHeight > 640;
+              final contentInset = isKeyboardVisibleNow
+                  ? AppSpacing.lg
+                  : (tall ? AppSpacing.xxl : AppSpacing.xl);
+
+              return Column(
+                children: [
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      pad,
+                      isKeyboardVisibleNow ? AppSpacing.sm : AppSpacing.lg,
+                      pad,
+                      AppSpacing.sm,
+                    ),
+                    child: HomeLayout.constrain(
+                      screenWidth: width,
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: AppColors.lavender.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(AppRadius.md),
+                            ),
+                            child: const Icon(
+                              Icons.menu_book_rounded,
+                              color: AppColors.lavender,
+                            ),
                           ),
-                        ),
+                          const SizedBox(width: AppSpacing.md),
+                          Expanded(
+                            child: Text(
+                              'Слушај текст',
+                              style: Theme.of(context).textTheme.titleLarge,
+                            ),
+                          ),
+                          if (!isKeyboardVisibleNow)
+                            FilterChip(
+                              label: const Text('Линијар'),
+                              selected: settings.readingRulerEnabled,
+                              onSelected: settings.setReadingRulerEnabled,
+                              visualDensity: VisualDensity.compact,
+                              avatar: Icon(
+                                Icons.horizontal_rule_rounded,
+                                size: 18,
+                                color: settings.readingRulerEnabled
+                                    ? AppColors.primary
+                                    : context.appTextSecondary,
+                              ),
+                              selectedColor: AppColors.primary.withValues(
+                                alpha: 0.15,
+                              ),
+                              checkmarkColor: AppColors.primary,
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(
+                        pad,
+                        0,
+                        pad,
+                        isKeyboardVisibleNow ? AppSpacing.sm : AppSpacing.md,
+                      ),
+                      child: HomeLayout.constrain(
+                        screenWidth: width,
+                        maxWidth: 720,
                         child: Column(
                           children: [
-                            Padding(
-                              padding:
-                              const EdgeInsets.fromLTRB(26, 24, 26, 14),
-                              child: TextField(
-                                controller: _controller,
-                                maxLines: 9,
-                                minLines: 9,
-                                style: const TextStyle(
-                                  fontSize: 23,
-                                  height: 1.65,
-                                  color: Color(0xFF07162E),
-                                  fontWeight: FontWeight.w400,
+                            Expanded(
+                              child: Container(
+                                width: double.infinity,
+                                decoration: BoxDecoration(
+                                  color: context.appSurface,
+                                  borderRadius: BorderRadius.circular(
+                                    AppRadius.hero,
+                                  ),
+                                  border: Border.all(color: context.appBorder),
+                                  boxShadow: context.highContrast
+                                      ? AppElevation.none
+                                      : AppElevation.soft(context),
                                 ),
-                                decoration: const InputDecoration(
-                                  border: InputBorder.none,
-                                  hintText: 'Внеси или залепи текст...',
-                                  hintStyle: TextStyle(
-                                    color: Color(0xFF6A7284),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(
+                                    AppRadius.hero,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      if (hasText && !isKeyboardVisibleNow)
+                                        ListenTextToolbar(
+                                          title: _toolbarTitle,
+                                          wordCount: _words,
+                                          speedLabel: speechRateLabel(
+                                            settings.speechRate,
+                                          ),
+                                          onCopy: _copyText,
+                                          onSpeed: () => _changeSpeed(settings),
+                                          onClear: _confirmClear,
+                                          onSave: _saveText,
+                                          saved: _isSaved,
+                                          saving: _draft.saving,
+                                          status: _isSaved
+                                              ? SavedTextStatusLabel(
+                                                  id: _draft.savedId,
+                                                )
+                                              : null,
+                                        ),
+                                      WordFocusSwitchRow(
+                                        value: readingMode,
+                                        onChanged: hasText
+                                            ? _setWordFocus
+                                            : null,
+                                        hint: hasText
+                                            ? null
+                                            : 'Внеси или залепи текст за да користиш фокус на збор.',
+                                        action: readingMode
+                                            ? TextButton.icon(
+                                                onPressed: _editText,
+                                                icon: const Icon(
+                                                  Icons.edit_rounded,
+                                                  size: 20,
+                                                ),
+                                                label: const Text(
+                                                  'Уреди текст',
+                                                ),
+                                                style: TextButton.styleFrom(
+                                                  foregroundColor:
+                                                      AppColors.primary,
+                                                  minimumSize: const Size(
+                                                    AppTouch.min,
+                                                    AppTouch.min,
+                                                  ),
+                                                ),
+                                              )
+                                            : null,
+                                      ),
+                                      Expanded(
+                                        child: Stack(
+                                          fit: StackFit.expand,
+                                          clipBehavior: Clip.hardEdge,
+                                          children: [
+                                            if (readingMode)
+                                              SingleChildScrollView(
+                                                controller:
+                                                    _textScrollController,
+                                                padding: EdgeInsets.fromLTRB(
+                                                  contentInset,
+                                                  contentInset,
+                                                  contentInset,
+                                                  contentInset +
+                                                      AppTouch.min +
+                                                      AppSpacing.md,
+                                                ),
+                                                child: WordFocusText(
+                                                  key: _wordFocusKey,
+                                                  text: _controller.text,
+                                                  style: context
+                                                      .readingTextStyle(),
+                                                  selection: focusedWord,
+                                                  backgroundColor:
+                                                      context.appSurface,
+                                                  onSelectionChanged:
+                                                      _onFocusedWordChanged,
+                                                ),
+                                              )
+                                            else
+                                              TextField(
+                                                controller: _controller,
+                                                focusNode: _editorFocus,
+                                                scrollController:
+                                                    _textScrollController,
+                                                onChanged: _onTextChanged,
+                                                expands: true,
+                                                maxLines: null,
+                                                minLines: null,
+                                                textAlignVertical:
+                                                    TextAlignVertical.top,
+                                                keyboardType:
+                                                    TextInputType.multiline,
+                                                textInputAction:
+                                                    TextInputAction.newline,
+                                                style: context
+                                                    .readingTextStyle(),
+                                                decoration: InputDecoration(
+                                                  border: InputBorder.none,
+                                                  filled: true,
+                                                  fillColor: Colors.transparent,
+                                                  contentPadding:
+                                                      EdgeInsets.all(
+                                                        contentInset,
+                                                      ),
+                                                  hintText: hasText
+                                                      ? null
+                                                      : 'Што сакаш да слушаш?\nНапиши или залепи текст.',
+                                                  hintMaxLines: 3,
+                                                  hintStyle: TextStyle(
+                                                    color: context
+                                                        .appTextSecondary
+                                                        .withValues(alpha: 0.6),
+                                                    height: 1.35,
+                                                  ),
+                                                ),
+                                              ),
+                                            if (!isKeyboardVisibleNow)
+                                              ReadingRulerOverlay(
+                                                enabled: settings
+                                                    .readingRulerEnabled,
+                                                textStyle: context
+                                                    .readingTextStyle(),
+                                                contentTopInset: contentInset,
+                                                dimOpacity: settings
+                                                    .readingRulerDimOpacity,
+                                                scrollController:
+                                                    _textScrollController,
+                                                onTapThrough: readingMode
+                                                    ? (position) =>
+                                                          _wordFocusKey
+                                                              .currentState
+                                                              ?.handleTapAt(
+                                                                position,
+                                                              )
+                                                    : null,
+                                              ),
+                                            if (focusedWord != null)
+                                              Positioned(
+                                                right: AppSpacing.md,
+                                                bottom: AppSpacing.md,
+                                                child: WordFocusClearButton(
+                                                  onPressed: () =>
+                                                      _onFocusedWordChanged(
+                                                        null,
+                                                      ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                onChanged: (_) {
-                                  setState(() {});
-                                },
                               ),
                             ),
-
-                            const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 26),
-                              child: Divider(
-                                height: 1,
-                                color: Color(0xFFE7E1D5),
+                            if (!isKeyboardVisibleNow) ...[
+                              const SizedBox(height: AppSpacing.md),
+                              SimplifyTextBar(
+                                enabled: hasText,
+                                isLoading: _isSimplifying,
+                                hasSimplified: _hasSimplified,
+                                showingSimplified: _showSimplified,
+                                onSimplify: _simplifyText,
+                                onShowingSimplifiedChanged:
+                                    _onShowingSimplifiedChanged,
                               ),
-                            ),
-
-                            Padding(
-                              padding:
-                              const EdgeInsets.fromLTRB(26, 18, 26, 22),
-                              child: Row(
-                                mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(
-                                    '$_characterCount знаци',
-                                    style: const TextStyle(
-                                      color: Color(0xFF505A70),
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                  Text(
-                                    '$_wordCount зборови',
-                                    style: const TextStyle(
-                                      color: Color(0xFF505A70),
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                ],
+                              const SizedBox(height: AppSpacing.md),
+                              ReadingControls(
+                                isReading: _isReading,
+                                onPlay: () => _start(settings.speechRate),
+                                onStop: _stop,
                               ),
-                            ),
+                            ],
                           ],
                         ),
                       ),
                     ),
-
-                    const SizedBox(height: 32),
-
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 28),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: _PrimaryButton(
-                              icon: Icons.play_arrow_rounded,
-                              label:
-                              _isReading ? 'Чита...' : 'Започни читање',
-                              onTap: _startReading,
-                            ),
-                          ),
-                          const SizedBox(width: 18),
-                          Expanded(
-                            child: _StopButton(
-                              onTap: _stopReading,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 28),
-
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 32),
-                      child: Text(
-                        'Демо приказ — реален TTS може да се вклучи подоцна.',
-                        style: TextStyle(
-                          color: Color(0xFF505A70),
-                          fontSize: 16,
-                          height: 1.4,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            _BottomNavBar(
-              currentIndex: 1,
-              onHomeTap: _goToHome,
-              onReadTap: () {},
-              onScanTap: _goToScan,
-              onProfileTap: _goToProfile,
-              onSettingsTap: _goToSettings,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TtsHeader extends StatelessWidget {
-  const _TtsHeader();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 20),
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(38, 72, 28, 48),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            Color(0xFF63B5D2),
-            Color(0xFF638FDF),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.only(
-          bottomLeft: Radius.circular(38),
-          bottomRight: Radius.circular(38),
-        ),
-      ),
-      child: const Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Читај текст',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 38,
-              height: 1.05,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          SizedBox(height: 18),
-          Text(
-            'Внеси или залепи текст за гласно читање',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 19,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PrimaryButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  const _PrimaryButton({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(24),
-      child: Container(
-        height: 92,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [
-              Color(0xFF63B5D2),
-              Color(0xFF638FDF),
-            ],
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-          ),
-          borderRadius: BorderRadius.circular(24),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: Colors.white, size: 34),
-            const SizedBox(width: 10),
-            Flexible(
-              child: Text(
-                label,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _StopButton extends StatelessWidget {
-  final VoidCallback onTap;
-
-  const _StopButton({
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(24),
-      child: Container(
-        height: 92,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(
-            color: const Color(0xFFE7E1D5),
-            width: 1,
+                  ),
+                ],
+              );
+            },
           ),
         ),
-        child: const Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.stop_rounded,
-              color: Color(0xFF07162E),
-              size: 34,
-            ),
-            SizedBox(width: 10),
-            Text(
-              'Стоп',
-              style: TextStyle(
-                color: Color(0xFF07162E),
-                fontSize: 20,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _BottomNavBar extends StatelessWidget {
-  final int currentIndex;
-  final VoidCallback onHomeTap;
-  final VoidCallback onReadTap;
-  final VoidCallback onScanTap;
-  final VoidCallback onProfileTap;
-  final VoidCallback onSettingsTap;
-
-  const _BottomNavBar({
-    required this.currentIndex,
-    required this.onHomeTap,
-    required this.onReadTap,
-    required this.onScanTap,
-    required this.onProfileTap,
-    required this.onSettingsTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 112,
-      padding: const EdgeInsets.fromLTRB(18, 12, 18, 18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          top: BorderSide(
-            color: const Color(0xFFE7E1D5).withOpacity(0.8),
-            width: 1,
-          ),
-        ),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _BottomNavItem(
-            icon: Icons.home_outlined,
-            label: 'Дома',
-            selected: currentIndex == 0,
-            onTap: onHomeTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.menu_book_outlined,
-            label: 'Читај',
-            selected: currentIndex == 1,
-            onTap: onReadTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.document_scanner_outlined,
-            label: 'Скенирај',
-            selected: currentIndex == 2,
-            onTap: onScanTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.person_outline_rounded,
-            label: 'Профил',
-            selected: currentIndex == 3,
-            onTap: onProfileTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.settings_outlined,
-            label: 'Поставки',
-            selected: currentIndex == 4,
-            onTap: onSettingsTap,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BottomNavItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  const _BottomNavItem({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final Color activeColor = const Color(0xFF3196C2);
-    final Color inactiveColor = const Color(0xFF5E6677);
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(28),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: selected ? const Color(0xFFCFF2FF) : Colors.transparent,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              icon,
-              size: 29,
-              color: selected ? activeColor : inactiveColor,
-            ),
-          ),
-          const SizedBox(height: 7),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: selected ? activeColor : inactiveColor,
-            ),
-          ),
-        ],
       ),
     );
   }

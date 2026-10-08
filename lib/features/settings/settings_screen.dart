@@ -1,500 +1,311 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../../core/app_settings.dart';
+import '../../core/theme.dart';
+import '../../widgets/app_bottom_nav.dart';
+import '../../widgets/ui/decorative_background.dart';
+import '../../widgets/ui/home_layout.dart';
+import '../../widgets/ui/icon_badge.dart';
 import '../home/home_screen.dart';
-import '../tts/tts_screen.dart';
 import '../ocr/ocr_screen.dart';
 import '../profile/profile_screen.dart';
+import '../tts/tts_screen.dart';
+import 'provider.dart';
+import 'settings_widgets/settings_controls.dart';
+import 'settings_widgets/settings_sync_status.dart';
 
-class SettingsScreen extends StatefulWidget {
+class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
-  @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
-}
+  static const _fontPresets = <double>[14, 17, 26];
+  static List<double> get _speedPresets => AppSettings.speechRatePresets;
 
-class _SettingsScreenState extends State<SettingsScreen> {
-  bool darkTheme = false;
-  bool dyslexiaFont = false;
-  double fontSize = 17;
-
-  void _goToHome() {
+  void _navigate(BuildContext context, Widget screen) {
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
+      MaterialPageRoute(builder: (_) => screen),
     );
   }
 
-  void _goToRead() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const TtsScreen()),
-    );
+  int _nearestIndex(double value, List<double> presets) {
+    var best = 0;
+    var bestDist = (value - presets[0]).abs();
+    for (var i = 1; i < presets.length; i++) {
+      final d = (value - presets[i]).abs();
+      if (d < bestDist) {
+        best = i;
+        bestDist = d;
+      }
+    }
+    return best;
   }
 
-  void _goToScan() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const OcrScreen()),
-    );
+  int _appearanceIndex(SettingsProvider settings) {
+    if (settings.highContrastMode) return 2;
+    if (settings.darkMode) return 1;
+    return 0;
   }
 
-  void _goToProfile() {
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const ProfileScreen()),
+  Future<void> _confirmReset(
+    BuildContext context,
+    SettingsProvider settings,
+  ) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Да ги вратиме поставките?'),
+        content: const Text(
+          'Сите поставки ќе се вратат на почетните вредности.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Откажи'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Врати'),
+          ),
+        ],
+      ),
     );
+    if (ok == true) await settings.resetToDefaults();
+  }
+
+  Future<void> _setAppearance(SettingsProvider settings, int index) async {
+    switch (index) {
+      case 1:
+        await settings.setHighContrastMode(false);
+        await settings.setDarkMode(true);
+      case 2:
+        await settings.setHighContrastMode(true);
+      default:
+        await settings.setHighContrastMode(false);
+        await settings.setDarkMode(false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final settings = context.watch<SettingsProvider>();
+    final fontIndex = _nearestIndex(settings.fontSize, _fontPresets);
+    final speedIndex = _nearestIndex(settings.speechRate, _speedPresets);
+    final appearanceIndex = _appearanceIndex(settings);
+
     return Scaffold(
-      backgroundColor: const Color(0xFFFBFAF3),
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(28, 70, 28, 34),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Поставки',
-                      style: TextStyle(
-                        color: Color(0xFF07162E),
-                        fontSize: 40,
-                        fontWeight: FontWeight.w800,
+      backgroundColor: context.appBackground,
+      body: DecorativeBackground(
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final width = constraints.maxWidth;
+                    final padding = HomeLayout.horizontalPadding(width);
+
+                    return SingleChildScrollView(
+                      padding: EdgeInsets.fromLTRB(
+                        padding,
+                        AppSpacing.xl,
+                        padding,
+                        AppSpacing.xxl,
                       ),
-                    ),
-
-                    const SizedBox(height: 14),
-
-                    const Text(
-                      'Прилагоди ја апликацијата за себе',
-                      style: TextStyle(
-                        color: Color(0xFF505A70),
-                        fontSize: 20,
-                        height: 1.35,
-                      ),
-                    ),
-
-                    const SizedBox(height: 52),
-
-                    _SwitchSettingCard(
-                      icon: Icons.dark_mode_outlined,
-                      title: 'Темна тема',
-                      subtitle: 'Поудобно за вечерно читање',
-                      value: darkTheme,
-                      onChanged: (value) {
-                        setState(() {
-                          darkTheme = value;
-                        });
-                      },
-                    ),
-
-                    const SizedBox(height: 20),
-
-                    _SwitchSettingCard(
-                      icon: Icons.auto_awesome_outlined,
-                      title: 'Дислексија фонт',
-                      subtitle: 'OpenDyslexic + поголем простор',
-                      value: dyslexiaFont,
-                      onChanged: (value) {
-                        setState(() {
-                          dyslexiaFont = value;
-                        });
-                      },
-                    ),
-
-                    const SizedBox(height: 20),
-
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(26),
-                        border: Border.all(
-                          color: const Color(0xFFE7E1D5),
-                        ),
-                      ),
-                      child: Column(
-                        children: [
-                          Row(
-                            children: [
-                              const _SettingIcon(
-                                icon: Icons.text_fields_rounded,
-                              ),
-                              const SizedBox(width: 18),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Text(
-                                      'Големина на фонт',
-                                      style: TextStyle(
-                                        color: Color(0xFF07162E),
-                                        fontSize: 19,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      '${fontSize.round()}px',
-                                      style: const TextStyle(
-                                        color: Color(0xFF505A70),
-                                        fontSize: 16,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-
-                          const SizedBox(height: 22),
-
-                          Slider(
-                            value: fontSize,
-                            min: 14,
-                            max: 26,
-                            divisions: 12,
-                            activeColor: const Color(0xFF63B5D2),
-                            inactiveColor: const Color(0xFF343434),
-                            onChanged: (value) {
-                              setState(() {
-                                fontSize = value;
-                              });
-                            },
-                          ),
-
-                          const SizedBox(height: 18),
-
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 20,
-                              vertical: 20,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF1EEE8),
-                              borderRadius: BorderRadius.circular(18),
-                            ),
-                            child: Text(
-                              'Преглед на текст',
-                              style: TextStyle(
-                                color: const Color(0xFF07162E),
-                                fontSize: fontSize,
-                                height: 1.4,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 20),
-
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(26),
-                        border: Border.all(
-                          color: const Color(0xFFE7E1D5),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          const _SettingIcon(
-                            icon: Icons.language_rounded,
-                          ),
-                          const SizedBox(width: 18),
-                          const Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                      child: HomeLayout.constrain(
+                        screenWidth: width,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
                               children: [
-                                Text(
-                                  'Јазик',
-                                  style: TextStyle(
-                                    color: Color(0xFF07162E),
-                                    fontSize: 19,
-                                    fontWeight: FontWeight.w800,
-                                  ),
+                                IconBadge(
+                                  icon: Icons.tune_rounded,
+                                  color: AppColors.primary,
+                                  size: 48,
+                                  iconSize: 26,
                                 ),
-                                SizedBox(height: 4),
-                                Text(
-                                  'Македонски (кирилица)',
-                                  style: TextStyle(
-                                    color: Color(0xFF505A70),
-                                    fontSize: 16,
+                                const SizedBox(width: AppSpacing.md),
+                                Expanded(
+                                  child: Text(
+                                    'Поставки',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .headlineMedium
+                                        ?.copyWith(height: 1.2),
                                   ),
                                 ),
                               ],
                             ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
+
+                            const SizedBox(height: AppSpacing.xxl),
+
+                            SettingsSection(
+                              title: 'Читање',
+                              children: [
+                                SettingsGroupCard(
+                                  children: [
+                                    SettingsToggleRow(
+                                      icon: Icons.font_download_rounded,
+                                      color: AppColors.coral,
+                                      title: 'Полесен фонт',
+                                      value: settings.dyslexiaFont,
+                                      onChanged: settings.setDyslexiaFont,
+                                    ),
+                                    SettingsLabeledChoice(
+                                      icon: Icons.format_size_rounded,
+                                      color: AppColors.primary,
+                                      title: 'Големина на текст',
+                                      options: const [
+                                        SettingsChoiceOption(label: 'Мал'),
+                                        SettingsChoiceOption(label: 'Среден'),
+                                        SettingsChoiceOption(label: 'Голем'),
+                                      ],
+                                      selectedIndex: fontIndex,
+                                      onSelected: (i) =>
+                                          settings.setFontSize(_fontPresets[i]),
+                                    ),
+                                    SettingsToggleRow(
+                                      icon: Icons.horizontal_rule_rounded,
+                                      color: AppColors.sky,
+                                      title: 'Линијар за читање',
+                                      value: settings.readingRulerEnabled,
+                                      onChanged:
+                                          settings.setReadingRulerEnabled,
+                                    ),
+                                    SettingsToggleRow(
+                                      icon: Icons.center_focus_strong_rounded,
+                                      color: AppColors.mint,
+                                      title: 'Фокус при читање',
+                                      value: settings.focusMode,
+                                      onChanged: settings.setFocusMode,
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFE3F0E7),
-                              borderRadius: BorderRadius.circular(22),
+
+                            const SizedBox(height: AppSpacing.xxxl),
+
+                            SettingsSection(
+                              title: 'Слушање',
+                              children: [
+                                SettingsGroupCard(
+                                  children: [
+                                    SettingsLabeledChoice(
+                                      icon: Icons.speed_rounded,
+                                      color: AppColors.lavender,
+                                      title: 'Брзина на гласот',
+                                      options: const [
+                                        SettingsChoiceOption(label: 'Бавно'),
+                                        SettingsChoiceOption(label: 'Нормално'),
+                                        SettingsChoiceOption(label: 'Брзо'),
+                                      ],
+                                      selectedIndex: speedIndex,
+                                      onSelected: (i) => settings.setSpeechRate(
+                                        _speedPresets[i],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
-                            child: const Text(
-                              'MK',
-                              style: TextStyle(
-                                color: Color(0xFF07162E),
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
+
+                            const SizedBox(height: AppSpacing.xxxl),
+
+                            SettingsSection(
+                              title: 'Изглед',
+                              children: [
+                                SettingsGroupCard(
+                                  children: [
+                                    SettingsLabeledChoice(
+                                      icon: Icons.palette_rounded,
+                                      color: AppColors.gold,
+                                      title: 'Тема',
+                                      options: const [
+                                        SettingsChoiceOption(
+                                          label: 'Светло',
+                                          icon: Icons.wb_sunny_rounded,
+                                        ),
+                                        SettingsChoiceOption(
+                                          label: 'Темно',
+                                          icon: Icons.dark_mode_rounded,
+                                        ),
+                                        SettingsChoiceOption(
+                                          label: 'Висок контраст',
+                                          icon: Icons.contrast_rounded,
+                                        ),
+                                      ],
+                                      selectedIndex: appearanceIndex,
+                                      onSelected: (i) =>
+                                          _setAppearance(settings, i),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+
+                            const SizedBox(height: AppSpacing.xxxl),
+
+                            SettingsSyncStatusCard(
+                              status: settings.syncStatus,
+                              waitingForNetwork: settings.syncWaitingForNetwork,
+                              onRetry: settings.retrySync,
+                            ),
+
+                            const SizedBox(height: AppSpacing.xxl),
+
+                            SizedBox(
+                              width: double.infinity,
+                              child: OutlinedButton(
+                                onPressed: () =>
+                                    _confirmReset(context, settings),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: context.appTextSecondary,
+                                  side: BorderSide(color: context.appBorder),
+                                  minimumSize: const Size(
+                                    double.infinity,
+                                    AppTouch.min,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: AppSpacing.xl,
+                                    vertical: AppSpacing.lg,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      AppRadius.xl,
+                                    ),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'Врати стандардни поставки',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 15,
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 48),
-
-                    const Center(
-                      child: Text(
-                        'ЧитајЛесно · v1.0 · Фронтенд прототип',
-                        style: TextStyle(
-                          color: Color(0xFF505A70),
-                          fontSize: 16,
+                          ],
                         ),
                       ),
-                    ),
-                  ],
+                    );
+                  },
                 ),
               ),
-            ),
-
-            _BottomNavBar(
-              currentIndex: 4,
-              onHomeTap: _goToHome,
-              onReadTap: _goToRead,
-              onScanTap: _goToScan,
-              onProfileTap: _goToProfile,
-              onSettingsTap: () {},
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SwitchSettingCard extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  const _SwitchSettingCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(
-          color: const Color(0xFFE7E1D5),
-        ),
-      ),
-      child: Row(
-        children: [
-          _SettingIcon(icon: icon),
-          const SizedBox(width: 18),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Color(0xFF07162E),
-                    fontSize: 19,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    color: Color(0xFF505A70),
-                    fontSize: 16,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Switch(
-            value: value,
-            activeColor: Colors.white,
-            activeTrackColor: const Color(0xFF7DD3C7),
-            inactiveThumbColor: Colors.white,
-            inactiveTrackColor: const Color(0xFFE8E5DC),
-            onChanged: onChanged,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SettingIcon extends StatelessWidget {
-  final IconData icon;
-
-  const _SettingIcon({
-    required this.icon,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 58,
-      height: 58,
-      decoration: BoxDecoration(
-        color: const Color(0xFFCFF2FF),
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Icon(
-        icon,
-        color: const Color(0xFF3196C2),
-        size: 31,
-      ),
-    );
-  }
-}
-
-class _BottomNavBar extends StatelessWidget {
-  final int currentIndex;
-  final VoidCallback onHomeTap;
-  final VoidCallback onReadTap;
-  final VoidCallback onScanTap;
-  final VoidCallback onProfileTap;
-  final VoidCallback onSettingsTap;
-
-  const _BottomNavBar({
-    required this.currentIndex,
-    required this.onHomeTap,
-    required this.onReadTap,
-    required this.onScanTap,
-    required this.onProfileTap,
-    required this.onSettingsTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 112,
-      padding: const EdgeInsets.fromLTRB(18, 12, 18, 18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          top: BorderSide(
-            color: const Color(0xFFE7E1D5).withOpacity(0.8),
-            width: 1,
+              AppBottomNav(
+                currentIndex: 4,
+                onHomeTap: () => _navigate(context, const HomeScreen()),
+                onReadTap: () => _navigate(context, const TtsScreen()),
+                onScanTap: () => _navigate(context, const OcrScreen()),
+                onProfileTap: () => _navigate(context, const ProfileScreen()),
+                onSettingsTap: () {},
+              ),
+            ],
           ),
         ),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _BottomNavItem(
-            icon: Icons.home_outlined,
-            label: 'Дома',
-            selected: currentIndex == 0,
-            onTap: onHomeTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.menu_book_outlined,
-            label: 'Читај',
-            selected: currentIndex == 1,
-            onTap: onReadTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.document_scanner_outlined,
-            label: 'Скенирај',
-            selected: currentIndex == 2,
-            onTap: onScanTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.person_outline_rounded,
-            label: 'Профил',
-            selected: currentIndex == 3,
-            onTap: onProfileTap,
-          ),
-          _BottomNavItem(
-            icon: Icons.settings_outlined,
-            label: 'Поставки',
-            selected: currentIndex == 4,
-            onTap: onSettingsTap,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BottomNavItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  const _BottomNavItem({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final Color activeColor = const Color(0xFF3196C2);
-    final Color inactiveColor = const Color(0xFF5E6677);
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(28),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: selected ? const Color(0xFFCFF2FF) : Colors.transparent,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              icon,
-              size: 29,
-              color: selected ? activeColor : inactiveColor,
-            ),
-          ),
-          const SizedBox(height: 7),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: selected ? activeColor : inactiveColor,
-            ),
-          ),
-        ],
       ),
     );
   }
